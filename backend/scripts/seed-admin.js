@@ -5,14 +5,25 @@ require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const mysql = require('mysql2/promise');
 const config = require('../src/config');
+const { normalizePhone, maskPhone, PhoneError } = require('../src/lib/phone');
 
 async function main() {
-  const { phone, password, firstName, lastName } = config.seedAdmin;
+  const { phone: rawPhone, password, firstName, lastName } = config.seedAdmin;
 
   if (!password) {
     throw new Error(
       'SEED_ADMIN_PASSWORD is not set. Set it in backend/.env before seeding.'
     );
+  }
+
+  let phone;
+  try {
+    phone = normalizePhone(rawPhone);
+  } catch (error) {
+    if (error instanceof PhoneError) {
+      throw new Error('SEED_ADMIN_PHONE is not a valid Bulgarian phone number.');
+    }
+    throw error;
   }
 
   const connection = await mysql.createConnection({
@@ -32,7 +43,7 @@ async function main() {
 
     if (existing.length > 0) {
       console.log(
-        `[seed:admin] an account with phone ${phone} already exists ` +
+        `[seed:admin] an account with phone ${maskPhone(phone)} already exists ` +
           `(user_id=${existing[0].user_id}); not overwriting.`
       );
       return;
@@ -47,7 +58,7 @@ async function main() {
 
     console.log(
       `[seed:admin] created administrator user_id=${result.insertId} ` +
-        `(${firstName} ${lastName}, phone=${phone}).`
+        `(${firstName} ${lastName}, phone=${maskPhone(phone)}).`
     );
   } finally {
     await connection.end();

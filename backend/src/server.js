@@ -4,6 +4,9 @@ const config = require('./config');
 
 process.env.TZ = config.timezone;
 
+// Fail fast before listening if authentication configuration is unusable.
+config.assertAuthConfig();
+
 const app = require('./app');
 
 const server = app.listen(config.port, () => {

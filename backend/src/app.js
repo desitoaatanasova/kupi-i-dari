@@ -7,6 +7,12 @@ const rateLimit = require('express-rate-limit');
 
 const config = require('./config');
 const healthRouter = require('./routes/health');
+const authRouter = require('./routes/auth');
+const adminRouter = require('./routes/admin');
+const locationsRouter = require('./routes/locations');
+const productsRouter = require('./routes/products');
+const quantitiesRouter = require('./routes/quantities');
+const shiftsRouter = require('./routes/shifts');
 const { notFoundHandler, errorHandler } = require('./middleware/error-handler');
 
 const app = express();
@@ -39,6 +45,12 @@ const apiLimiter = rateLimit({
 app.use('/api', apiLimiter);
 
 app.use('/api/health', healthRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/admin', adminRouter);
+app.use('/api/locations', locationsRouter);
+app.use('/api/products', productsRouter);
+app.use('/api/quantities', quantitiesRouter);
+app.use('/api/shifts', shiftsRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

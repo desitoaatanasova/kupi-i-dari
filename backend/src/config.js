@@ -11,6 +11,20 @@ function toInt(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+// Parse a duration such as "60m", "1h", "7d", "3600s" or "3600" into seconds.
+// Used for JWT expiry so the same value drives signing and the API response.
+function parseDurationSeconds(value, fallbackSeconds) {
+  if (value === undefined || value === null || value === '') return fallbackSeconds;
+  const text = String(value).trim();
+  if (/^\d+$/.test(text)) return parseInt(text, 10);
+  const match = /^(\d+)\s*(s|m|h|d)$/i.exec(text);
+  if (!match) return fallbackSeconds;
+  const multipliers = { s: 1, m: 60, h: 3600, d: 86400 };
+  return parseInt(match[1], 10) * multipliers[match[2].toLowerCase()];
+}
+
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '60m';
+
 const config = {
   env: process.env.NODE_ENV || 'development',
   port: toInt(process.env.PORT, 3001),
@@ -27,7 +41,18 @@ const config = {
 
   dbTest: process.env.DB_NAME_TEST || 'kupi_i_dari_test',
 
-  jwtSecret: process.env.JWT_SECRET || '',
+  jwt: {
+    secret: process.env.JWT_SECRET || '',
+    expiresIn: JWT_EXPIRES_IN,
+    expiresInSeconds: parseDurationSeconds(JWT_EXPIRES_IN, 3600),
+  },
+
+  authRateLimit: {
+    windowMs: toInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
+    loginMax: toInt(process.env.AUTH_RATE_LIMIT_MAX, 10),
+    volunteerMax: toInt(process.env.AUTH_VOLUNTEER_RATE_LIMIT_MAX, 20),
+    adminWriteMax: toInt(process.env.AUTH_ADMIN_WRITE_RATE_LIMIT_MAX, 30),
+  },
 
   corsOrigins: (process.env.CORS_ORIGIN || '')
     .split(',')
@@ -35,12 +60,11 @@ const config = {
     .filter(Boolean),
 
   rateLimit: {
-    windowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
+    windowMs: toInt(process.env.RATE_LIMIT_WINDOW_MS, 900000),
     max: toInt(process.env.RATE_LIMIT_MAX, 300),
   },
 
-  migrationsDir:
-    process.env.MIGRATIONS_DIR || path.resolve(REPO_ROOT, 'database', 'migrations'),
+  migrationsDir: path.join(REPO_ROOT, 'database', 'migrations'),
 
   seedAdmin: {
     phone: process.env.SEED_ADMIN_PHONE || '+359888000001',
@@ -50,4 +74,31 @@ const config = {
   },
 };
 
+// Fail fast for the HTTP server when auth configuration is unusable. Deliberately
+// does not run in tests and is not called by the migration/seed scripts, so those
+// workflows do not require a JWT secret.
+function assertAuthConfig() {
+  if (config.env === 'test') return;
+
+  if (!config.jwt.secret) {
+    throw new Error(
+      'JWT_SECRET is missing or empty. Set it in backend/.env before starting the API.'
+    );
+  }
+  if (!Number.isInteger(config.jwt.expiresInSeconds) || config.jwt.expiresInSeconds <= 0) {
+    throw new Error(
+      'JWT_EXPIRES_IN must resolve to a positive number of seconds (e.g. "60m" or 3600).'
+    );
+  }
+  const { windowMs, loginMax, volunteerMax, adminWriteMax } = config.authRateLimit;
+  if (![windowMs, loginMax, volunteerMax, adminWriteMax].every((n) => Number.isInteger(n) && n > 0)) {
+    throw new Error(
+      'Authentication rate-limit values (AUTH_RATE_LIMIT_WINDOW_MS, ' +
+        'AUTH_RATE_LIMIT_MAX, AUTH_VOLUNTEER_RATE_LIMIT_MAX, ' +
+        'AUTH_ADMIN_WRITE_RATE_LIMIT_MAX) must be positive integers.'
+    );
+  }
+}
+
 module.exports = config;
+module.exports.assertAuthConfig = assertAuthConfig;
