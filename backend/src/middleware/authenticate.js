@@ -45,7 +45,10 @@ async function authenticate(req, res, next) {
 
     // Trust the current database role, not the JWT claim.
     req.user = users.toSafeProfile(user);
-    next();
+
+    // Every authenticated request re-checks the DB-backed forced-password flag,
+    // so staff pending a change are blocked from all protected routes uniformly.
+    enforcePasswordChanged(req, res, next);
   } catch (error) {
     next(error);
   }
@@ -62,6 +65,34 @@ function requireRole(...roles) {
     }
     return next();
   };
+}
+
+// Endpoints reachable even while a forced password change is pending, so the
+// user can change their password, inspect their own profile and sign out.
+const PASSWORD_CHANGE_ALLOWLIST = new Set([
+  '/api/auth/password/change',
+  '/api/auth/me',
+  '/api/auth/logout',
+]);
+
+// Enforce the DB-backed must_change_password flag. Runs inside `authenticate`
+// after req.user is populated. Staff pending a forced change are blocked from
+// every protected route except the password-change allowlist.
+function enforcePasswordChanged(req, res, next) {
+  if (!req.user || !req.user.mustChangePassword) return next();
+
+  const originalUrl = req.originalUrl || req.url || '';
+  const path = originalUrl.split('?')[0];
+
+  if (PASSWORD_CHANGE_ALLOWLIST.has(path)) return next();
+
+  return next(
+    new AppError(
+      403,
+      'MUST_CHANGE_PASSWORD',
+      'Password change is required before continuing.'
+    )
+  );
 }
 
 module.exports = { authenticate, requireRole };

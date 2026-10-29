@@ -20,6 +20,7 @@ const CREATE_FIELDS = {
   locationId: { type: 'int', min: 1, max: MAX_INT },
   variantId: { type: 'int', min: 1, max: MAX_INT },
   quantity: { type: 'int', min: 0, max: MAX_INT },
+  shiftId: { type: 'int', min: 1, max: MAX_INT, required: false, nullable: true },
 };
 
 const UPDATE_FIELDS = {
@@ -30,6 +31,7 @@ const LIST_QUERY = {
   locationId: { type: 'int', min: 1, required: false },
   variantId: { type: 'int', min: 1, required: false },
   productId: { type: 'int', min: 1, required: false },
+  shiftId: { type: 'int', min: 1, required: false },
 };
 
 function parseQuantityId(raw) {
@@ -80,6 +82,7 @@ router.get('/', authenticate, requireRole(...ACCESS_ROLES), async (req, res, nex
       locationId: query.locationId,
       variantId: query.variantId,
       productId: query.productId,
+      shiftId: query.shiftId,
       responsibleUserId,
     });
     res.status(200).json({ quantities: rows.map(quantities.toSafeQuantity) });
@@ -102,7 +105,10 @@ router.get('/:quantityId', authenticate, requireRole(...ACCESS_ROLES), async (re
   }
 });
 
-// ADMIN/assigned RESPONSIBLE: create or replace a quantity for (location, variant).
+// ADMIN/assigned RESPONSIBLE: create or replace a quantity. Without `shiftId`
+// the row is unlinked (legacy per-location model); with `shiftId` it is a
+// distinct shift-linked row. Staff writes are not gated by the volunteer
+// entry window or registration rules.
 router.post(
   '/',
   authenticate,
@@ -118,6 +124,7 @@ router.post(
         variantId: body.variantId,
         quantity: body.quantity,
         recordedBy: req.user.id,
+        shiftId: body.shiftId === undefined ? null : body.shiftId,
       });
 
       res.status(result.created ? 201 : 200).json(quantities.toSafeQuantity(result.quantity));

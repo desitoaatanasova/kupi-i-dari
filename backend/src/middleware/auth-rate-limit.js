@@ -29,10 +29,28 @@ const volunteerLimiter = rateLimit({
   max: config.authRateLimit.volunteerMax,
 });
 
+// Public volunteer registration: separate bucket, same existing volunteer cap.
+const registerLimiter = rateLimit({
+  ...shared,
+  max: config.authRateLimit.volunteerMax,
+});
+
+// Strict volunteer login: separate bucket, same existing volunteer cap.
+const volunteerLoginLimiter = rateLimit({
+  ...shared,
+  max: config.authRateLimit.volunteerMax,
+});
+
 // Admin write operations (create/update/status): modest default (30 per IP).
 const adminWriteLimiter = rateLimit({
   ...shared,
   max: config.authRateLimit.adminWriteMax,
 });
 
-module.exports = { loginLimiter, volunteerLimiter, adminWriteLimiter };
+module.exports = {
+  loginLimiter,
+  volunteerLimiter,
+  registerLimiter,
+  volunteerLoginLimiter,
+  adminWriteLimiter,
+};

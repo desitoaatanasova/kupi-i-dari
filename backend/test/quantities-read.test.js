@@ -8,7 +8,7 @@ const { ensureMigrated } = require('./helpers/db');
 const auth = require('./helpers/auth');
 const app = require('../src/app');
 
-const QUANTITY_KEYS = ['id', 'locationId', 'variantId', 'quantity'];
+const QUANTITY_KEYS = ['id', 'shiftId', 'locationId', 'variantId', 'quantity'];
 const BASE = 884100000;
 
 let server;
@@ -25,6 +25,7 @@ before(async () => {
 after(async () => {
   await server.close();
   await auth.cleanQuantities();
+  await auth.cleanShifts();
   await auth.cleanProducts();
   await auth.cleanLocations();
   await auth.cleanUsers();
@@ -33,6 +34,7 @@ after(async () => {
 
 beforeEach(async () => {
   await auth.cleanQuantities();
+  await auth.cleanShifts();
   await auth.cleanProducts();
   await auth.cleanLocations();
   await auth.cleanUsers();
@@ -133,6 +135,7 @@ test('admin reads records across locations with the exact safe shape', async () 
   assert.equal(ra.locationId, a.locationId);
   assert.equal(ra.variantId, a.variantId);
   assert.equal(ra.quantity, 7);
+  assert.equal(ra.shiftId, null);
   assert.equal(byId.get(idB).quantity, 0);
 
   const detail = await auth.getJson(server.baseUrl, `/api/quantities/${idA}`, adminToken);
@@ -142,6 +145,7 @@ test('admin reads records across locations with the exact safe shape', async () 
   assert.equal(detail.body.locationId, a.locationId);
   assert.equal(detail.body.variantId, a.variantId);
   assert.equal(detail.body.quantity, 7);
+  assert.equal(detail.body.shiftId, null);
 });
 
 test('lists records in ascending id order and handles the empty case', async () => {
@@ -298,7 +302,7 @@ test('rejects malformed ids and returns 404 for missing records', async () => {
   assert.equal(missing.body.error.code, 'NOT_FOUND');
 });
 
-test('never exposes actor, timestamp, shift or sensitive fields', async () => {
+test('never exposes actor, timestamp or sensitive fields', async () => {
   const { locationId, variantId } = await makeFixture();
   const recordId = await auth.createCollectedQuantity({
     locationId,
@@ -313,13 +317,80 @@ test('never exposes actor, timestamp, shift or sensitive fields', async () => {
     'recordedBy',
     'recordedAt',
     'updatedAt',
-    'shiftId',
     'shift_id',
     'recorded_by',
     'collected_quantity_id',
     'password_hash',
     'token',
+    'phone',
+    'firstName',
+    'lastName',
   ]) {
     assert.ok(!(key in res.body), key);
+  }
+});
+
+test('filters by shiftId and combines it with existing filters', async () => {
+  const a = await makeFixture();
+  const b = await makeFixture();
+  const shift1 = await auth.createShift({ status: 'OPEN', locationIds: [a.locationId] });
+  const shift2 = await auth.createShift({ status: 'OPEN', locationIds: [a.locationId] });
+  const linked1 = await auth.createCollectedQuantity({
+    locationId: a.locationId,
+    variantId: a.variantId,
+    quantity: 1,
+    shiftId: shift1,
+  });
+  const linked2 = await auth.createCollectedQuantity({
+    locationId: a.locationId,
+    variantId: a.variantId,
+    quantity: 2,
+    shiftId: shift2,
+  });
+  const legacy = await auth.createCollectedQuantity({
+    locationId: a.locationId,
+    variantId: b.variantId,
+    quantity: 3,
+  });
+
+  const byShift1 = await auth.getJson(
+    server.baseUrl,
+    `/api/quantities?shiftId=${shift1}`,
+    adminToken
+  );
+  assert.equal(byShift1.status, 200, JSON.stringify(byShift1.body));
+  assert.deepEqual(byShift1.body.quantities.map((q) => q.id), [linked1]);
+  assert.equal(byShift1.body.quantities[0].shiftId, shift1);
+
+  const byShift2 = await auth.getJson(
+    server.baseUrl,
+    `/api/quantities?shiftId=${shift2}`,
+    adminToken
+  );
+  assert.deepEqual(byShift2.body.quantities.map((q) => q.id), [linked2]);
+
+  const combined = await auth.getJson(
+    server.baseUrl,
+    `/api/quantities?shiftId=${shift1}&variantId=${a.variantId}&locationId=${a.locationId}`,
+    adminToken
+  );
+  assert.deepEqual(combined.body.quantities.map((q) => q.id), [linked1]);
+
+  const all = await auth.getJson(server.baseUrl, '/api/quantities', adminToken);
+  assert.equal(all.body.quantities.length, 3);
+  assert.equal(all.body.quantities.find((q) => q.id === legacy).shiftId, null);
+});
+
+test('rejects malformed shiftId filters', async () => {
+  for (const path of [
+    '/api/quantities?shiftId=abc',
+    '/api/quantities?shiftId=0',
+    '/api/quantities?shiftId=-2',
+    '/api/quantities?shiftId=1.5',
+    '/api/quantities?shiftId=',
+  ]) {
+    const res = await auth.getJson(server.baseUrl, path, adminToken);
+    assert.equal(res.status, 400, path);
+    assert.equal(res.body.error.code, 'VALIDATION_ERROR', path);
   }
 });

@@ -6,12 +6,16 @@ const { AppError } = require('../lib/errors');
 const { validateBody, validateQuery } = require('../lib/validate');
 const shifts = require('../services/shifts');
 const locations = require('../services/locations');
+const quantities = require('../services/quantities');
+const shiftEntry = require('../services/shift-entry');
 const { authenticate, requireRole } = require('../middleware/authenticate');
 const { adminWriteLimiter } = require('../middleware/auth-rate-limit');
 
 const router = express.Router();
 
 const MAX_LOCATIONS = 100;
+const MAX_ENTRY_ITEMS = 100;
+const MAX_INT = 2147483647;
 const STATUS_VALUES = ['DRAFT', 'OPEN', 'CLOSED', 'CANCELLED'];
 
 const CREATE_FIELDS = {
@@ -67,6 +71,51 @@ function shiftNotFound() {
 
 function forbidden() {
   return new AppError(403, 'FORBIDDEN', 'You do not have permission to perform this action.');
+}
+
+// Parse the volunteer quantity-submission body without introducing a new
+// validation type: the object/array envelope is checked manually and each
+// item reuses the shared strict body validator (unknown fields rejected).
+const ENTRY_ITEM_SCHEMA = {
+  variantId: { type: 'int', min: 1, max: MAX_INT },
+  quantity: { type: 'int', min: 0, max: MAX_INT },
+};
+
+function parseSubmissionBody(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Request body must be a JSON object.');
+  }
+  const allowed = ['locationId', 'quantities'];
+  const unexpected = Object.keys(raw).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    throw new AppError(
+      400,
+      'VALIDATION_ERROR',
+      `Unexpected field(s): ${unexpected.join(', ')}.`
+    );
+  }
+  const { locationId } = validateBody({ locationId: raw.locationId }, {
+    locationId: { type: 'int', min: 1, max: MAX_INT },
+  });
+  if (!Array.isArray(raw.quantities)) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'quantities must be an array.');
+  }
+  if (raw.quantities.length < 1 || raw.quantities.length > MAX_ENTRY_ITEMS) {
+    throw new AppError(
+      400,
+      'VALIDATION_ERROR',
+      `quantities must contain between 1 and ${MAX_ENTRY_ITEMS} item(s).`
+    );
+  }
+  const items = raw.quantities.map((item) => validateBody(item, ENTRY_ITEM_SCHEMA));
+  const seen = new Set();
+  for (const item of items) {
+    if (seen.has(item.variantId)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'quantities must not contain duplicate variantIds.');
+    }
+    seen.add(item.variantId);
+  }
+  return { locationId, items };
 }
 
 // Attach the shift's safe location list to a safe shift object.
@@ -333,6 +382,60 @@ router.patch(
       }
 
       res.status(200).json(shifts.toSafeRegistration(result.registration));
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Any authenticated user: entry context for a shift (safe shift, the
+// caller's own submission permission and reason, the entry window, active
+// locations and the shift's quantity rows). Volunteers cannot see DRAFT
+// shifts (indistinguishable from absent). RESPONSIBLE is scoped to assigned
+// locations. Exposes no registration lists, names, phones or audit fields.
+router.get('/:shiftId/entry', authenticate, async (req, res, next) => {
+  try {
+    let shiftId;
+    try {
+      shiftId = parseShiftId(req.params.shiftId);
+    } catch (error) {
+      throw shiftNotFound();
+    }
+
+    const result = await shiftEntry.getEntryContext({
+      shiftId,
+      user: req.user,
+      now: new Date(),
+    });
+    if (!result.found) throw shiftNotFound();
+    res.status(200).json(result.context);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Volunteer: create or replace their quantities for one location of an OPEN
+// shift, within the entry window, with an active registration. Absolute
+// replacement of the submitted subset only; omitted variants are untouched.
+// Atomic for the whole batch. Returns every stored row for (shift, location).
+router.put(
+  '/:shiftId/quantities',
+  authenticate,
+  requireRole('VOLUNTEER'),
+  adminWriteLimiter,
+  async (req, res, next) => {
+    try {
+      const shiftId = parseShiftId(req.params.shiftId);
+      const { locationId, items } = parseSubmissionBody(req.body);
+
+      const result = await shiftEntry.submitQuantities({
+        shiftId,
+        userId: req.user.id,
+        locationId,
+        items,
+        now: new Date(),
+      });
+      res.status(200).json({ quantities: result.quantities.map(quantities.toSafeQuantity) });
     } catch (error) {
       next(error);
     }

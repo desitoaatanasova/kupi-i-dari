@@ -8,7 +8,7 @@ const { ensureMigrated } = require('./helpers/db');
 const auth = require('./helpers/auth');
 const app = require('../src/app');
 
-const QUANTITY_KEYS = ['id', 'locationId', 'variantId', 'quantity'];
+const QUANTITY_KEYS = ['id', 'shiftId', 'locationId', 'variantId', 'quantity'];
 const BASE = 884200000;
 
 let server;
@@ -25,6 +25,7 @@ before(async () => {
 after(async () => {
   await server.close();
   await auth.cleanQuantities();
+  await auth.cleanShifts();
   await auth.cleanProducts();
   await auth.cleanLocations();
   await auth.cleanUsers();
@@ -33,6 +34,7 @@ after(async () => {
 
 beforeEach(async () => {
   await auth.cleanQuantities();
+  await auth.cleanShifts();
   await auth.cleanProducts();
   await auth.cleanLocations();
   await auth.cleanUsers();
@@ -130,6 +132,7 @@ test('admin creates a quantity (201) with the safe shape and records the actor',
   assert.equal(res.body.locationId, locationId);
   assert.equal(res.body.variantId, variantId);
   assert.equal(res.body.quantity, 12);
+  assert.equal(res.body.shiftId, null);
 
   const [rows] = await auth.pool.query(
     'SELECT quantity, recorded_by, shift_id FROM collected_quantities WHERE location_id = ? AND variant_id = ?',
@@ -426,4 +429,143 @@ test('concurrent POSTs never duplicate a pair and settle on one value', async ()
     values.includes(Number(rows[0].quantity)),
     `final value ${rows[0].quantity} must be one of ${JSON.stringify(values)}`
   );
+});
+
+test('admin creates a shift-linked quantity (201) and replaces it (200)', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const shiftId = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+
+  const first = await post({ locationId, variantId, quantity: 6, shiftId });
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  assert.deepEqual(Object.keys(first.body).sort(), [...QUANTITY_KEYS].sort());
+  assert.equal(first.body.shiftId, shiftId);
+  assert.equal(first.body.quantity, 6);
+
+  const [rows] = await auth.pool.query(
+    'SELECT shift_id, recorded_by, quantity FROM collected_quantities WHERE shift_id = ? AND location_id = ? AND variant_id = ?',
+    [shiftId, locationId, variantId]
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(Number(rows[0].shift_id), shiftId);
+  assert.equal(Number(rows[0].recorded_by), admin.id);
+
+  const second = await post({ locationId, variantId, quantity: 9, shiftId });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.id, first.body.id);
+  assert.equal(second.body.quantity, 9);
+  assert.equal(second.body.shiftId, shiftId);
+});
+
+test('the same variant and location can hold separate quantities per shift', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const shift1 = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+  const shift2 = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+
+  const one = await post({ locationId, variantId, quantity: 3, shiftId: shift1 });
+  const two = await post({ locationId, variantId, quantity: 7, shiftId: shift2 });
+  assert.equal(one.status, 201);
+  assert.equal(two.status, 201);
+  assert.notEqual(one.body.id, two.body.id);
+
+  const [rows] = await auth.pool.query(
+    'SELECT shift_id, quantity FROM collected_quantities WHERE location_id = ? AND variant_id = ? ORDER BY shift_id',
+    [locationId, variantId]
+  );
+  assert.equal(rows.length, 2);
+  assert.deepEqual(
+    rows.map((r) => [Number(r.shift_id), Number(r.quantity)]),
+    [
+      [shift1, 3],
+      [shift2, 7],
+    ]
+  );
+});
+
+test('a shift-linked write does not disturb the legacy unlinked row', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const shiftId = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+
+  const legacy = await post({ locationId, variantId, quantity: 4 });
+  assert.equal(legacy.status, 201);
+  assert.equal(legacy.body.shiftId, null);
+
+  const linked = await post({ locationId, variantId, quantity: 8, shiftId });
+  assert.equal(linked.status, 201);
+
+  const [rows] = await auth.pool.query(
+    'SELECT shift_id, quantity FROM collected_quantities WHERE location_id = ? AND variant_id = ? ORDER BY shift_id IS NULL DESC, shift_id',
+    [locationId, variantId]
+  );
+  assert.equal(rows.length, 2);
+  const legacyRow = rows.find((r) => r.shift_id === null);
+  const linkedRow = rows.find((r) => Number(r.shift_id) === shiftId);
+  assert.equal(Number(legacyRow.quantity), 4);
+  assert.equal(Number(linkedRow.quantity), 8);
+});
+
+test('a shift-linked write returns 404 for a missing shift', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const res = await post({ locationId, variantId, quantity: 1, shiftId: 99999999 });
+  assert.equal(res.status, 404);
+  assert.equal(res.body.error.code, 'NOT_FOUND');
+
+  const [rows] = await auth.pool.query('SELECT COUNT(*) AS total FROM collected_quantities');
+  assert.equal(Number(rows[0].total), 0);
+});
+
+test('rejects a malformed shiftId in the body', async () => {
+  const { locationId, variantId } = await makeFixture();
+  for (const shiftId of [0, -1, 1.5, '2', true]) {
+    const res = await post({ locationId, variantId, quantity: 1, shiftId });
+    assert.equal(res.status, 400, JSON.stringify(shiftId));
+    assert.equal(res.body.error.code, 'VALIDATION_ERROR', JSON.stringify(shiftId));
+  }
+});
+
+test('concurrent shift-linked POSTs keep a single row and settle on one value', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const shiftId = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+  const values = [11, 22, 33, 44];
+
+  const results = await Promise.all(
+    values.map((quantity) => post({ locationId, variantId, quantity, shiftId }))
+  );
+
+  const statuses = results.map((r) => r.status);
+  assert.ok(
+    statuses.every((s) => s === 200 || s === 201),
+    JSON.stringify(statuses)
+  );
+  assert.equal(statuses.filter((s) => s === 201).length, 1);
+
+  const [rows] = await auth.pool.query(
+    'SELECT quantity FROM collected_quantities WHERE shift_id = ? AND location_id = ? AND variant_id = ?',
+    [shiftId, locationId, variantId]
+  );
+  assert.equal(rows.length, 1);
+  assert.ok(values.includes(Number(rows[0].quantity)));
+});
+
+test('the triple unique index rejects duplicate shift/location/variant rows', async () => {
+  const { locationId, variantId } = await makeFixture();
+  const shiftId = await auth.createShift({ status: 'OPEN', locationIds: [locationId] });
+  await auth.createCollectedQuantity({ locationId, variantId, quantity: 1, shiftId });
+
+  await assert.rejects(
+    () => auth.createCollectedQuantity({ locationId, variantId, quantity: 2, shiftId }),
+    (error) => error.code === 'ER_DUP_ENTRY'
+  );
+});
+
+test('repeated unlinked upserts never create duplicate NULL-shift rows', async () => {
+  const { locationId, variantId } = await makeFixture();
+  for (const quantity of [1, 2, 3, 4]) {
+    const res = await post({ locationId, variantId, quantity });
+    assert.ok(res.status === 200 || res.status === 201, JSON.stringify(res.body));
+  }
+  const [rows] = await auth.pool.query(
+    'SELECT collected_quantity_id FROM collected_quantities WHERE shift_id IS NULL AND location_id = ? AND variant_id = ?',
+    [locationId, variantId]
+  );
+  assert.equal(rows.length, 1);
 });

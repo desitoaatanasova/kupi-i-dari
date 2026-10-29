@@ -57,6 +57,20 @@ async function incrementTokenVersion(userId) {
   return result.affectedRows;
 }
 
+// Replace the password hash, clear the forced-change flag and revoke every
+// previously issued token in a single statement. Returns the refreshed row.
+async function setPasswordAndClearMustChange(userId, passwordHash) {
+  const [result] = await pool.query(
+    `UPDATE users
+        SET password_hash = ?, must_change_password = 0,
+            token_version = token_version + 1
+      WHERE user_id = ?`,
+    [passwordHash, userId]
+  );
+  if (result.affectedRows === 0) return null;
+  return findById(userId);
+}
+
 // Public/safe projection. Never exposes password_hash, token_version or audit fields.
 function toSafeProfile(row) {
   return {
@@ -235,6 +249,7 @@ module.exports = {
   createVolunteer,
   touchLastLogin,
   incrementTokenVersion,
+  setPasswordAndClearMustChange,
   toSafeProfile,
   listUsers,
   countUsers,

@@ -25,22 +25,29 @@ async function cleanQuantities() {
   await pool.query('DELETE FROM collected_quantities');
 }
 
-// Remove every location. Quantity records and assignments are cleared first so
-// the delete order is explicit rather than relying on ON DELETE RESTRICT/CASCADE.
-// Safe on the test database.
+// Remove every location. Quantity records, distributions and assignments are
+// cleared first so the delete order is explicit rather than relying on
+// ON DELETE RESTRICT/CASCADE. Safe on the test database.
 async function cleanLocations() {
+  await pool.query('DELETE FROM distributions');
   await pool.query('DELETE FROM collected_quantities');
   await pool.query('DELETE FROM responsible_locations');
   await pool.query('DELETE FROM locations');
 }
 
-// Remove every product and variant. Quantity records and variants are cleared
-// first so the delete order is explicit rather than relying on ON DELETE
-// RESTRICT/CASCADE. Safe on the test database.
+// Remove every product and variant. Quantity records, distributions and
+// variants are cleared first so the delete order is explicit rather than
+// relying on ON DELETE RESTRICT/CASCADE. Safe on the test database.
 async function cleanProducts() {
+  await pool.query('DELETE FROM distributions');
   await pool.query('DELETE FROM collected_quantities');
   await pool.query('DELETE FROM product_variants');
   await pool.query('DELETE FROM products');
+}
+
+// Remove every distribution record. Safe on the dedicated test database.
+async function cleanDistributions() {
+  await pool.query('DELETE FROM distributions');
 }
 
 // Remove every shift, its location links and its registrations. The links and
@@ -84,14 +91,14 @@ async function createLocation(options) {
 }
 
 // Insert a collected quantity directly (bypassing the API), used to seed read
-// tests. shift_id is always NULL in Phase 6.
+// tests. `shiftId` defaults to NULL (legacy unlinked Phase 6 row).
 async function createCollectedQuantity(options) {
-  const { locationId, variantId, quantity = 0, recordedBy = null } = options;
+  const { locationId, variantId, quantity = 0, recordedBy = null, shiftId = null } = options;
   const [result] = await pool.query(
     `INSERT INTO collected_quantities
        (shift_id, location_id, variant_id, quantity, recorded_by)
-     VALUES (NULL, ?, ?, ?, ?)`,
-    [locationId, variantId, quantity, recordedBy]
+     VALUES (?, ?, ?, ?, ?)`,
+    [shiftId, locationId, variantId, quantity, recordedBy]
   );
   return result.insertId;
 }
@@ -101,6 +108,27 @@ async function assignResponsible(userId, locationId) {
   const [result] = await pool.query(
     'INSERT INTO responsible_locations (user_id, location_id) VALUES (?, ?)',
     [userId, locationId]
+  );
+  return result.insertId;
+}
+
+// Insert a distribution directly (bypassing the API), used to seed read tests.
+// `distributionDate` defaults to a fixed Sofia business date.
+async function createDistribution(options) {
+  const {
+    locationId,
+    variantId,
+    quantity = 1,
+    distributionDate = '2026-11-01',
+    recipient = null,
+    note = null,
+    distributedBy = null,
+  } = options;
+  const [result] = await pool.query(
+    `INSERT INTO distributions
+       (location_id, variant_id, distribution_date, quantity, recipient, note, distributed_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [locationId, variantId, distributionDate, quantity, recipient, note, distributedBy]
   );
   return result.insertId;
 }
@@ -279,10 +307,12 @@ module.exports = {
   cleanProducts,
   cleanQuantities,
   cleanShifts,
+  cleanDistributions,
   createLocation,
   createProduct,
   createVariant,
   createCollectedQuantity,
+  createDistribution,
   assignResponsible,
   createShift,
   linkShiftLocation,

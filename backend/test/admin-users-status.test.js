@@ -111,6 +111,36 @@ test('the last active administrator cannot be deactivated', async () => {
   assert.equal(await isActiveInDb(adminId), true);
 });
 
+test('the API refuses to leave the system without an active administrator', async () => {
+  // HTTP-level check of the last-administrator invariant. Two active admins:
+  // the acting admin deactivates the peer, leaving a single active
+  // administrator. Through the API that survivor is always the caller (an
+  // active admin), so the route refuses the removal and the account stays
+  // active. The non-self LAST_ADMIN branch is unreachable over HTTP because the
+  // authenticated caller is itself an active admin, and is covered directly in
+  // the service-level test above.
+  const peer = await auth.createUser({
+    phone: phone(4),
+    role: 'ADMIN',
+    password: auth.TEST_PASSWORD,
+  });
+
+  const removed = await setStatus(peer, false);
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.isActive, false);
+  assert.equal(await isActiveInDb(peer), false);
+
+  const refused = await setStatus(adminId, false);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error.code, 'SELF_DEACTIVATION');
+  assert.equal(await isActiveInDb(adminId), true);
+
+  const [rows] = await auth.pool.query(
+    "SELECT COUNT(*) AS total FROM users WHERE role = 'ADMIN' AND is_active = 1"
+  );
+  assert.ok(Number(rows[0].total) >= 1, 'at least one active administrator must remain');
+});
+
 test('status changes are idempotent', async () => {
   const id = await auth.createUser({ phone: phone(3), role: 'RESPONSIBLE', password: auth.TEST_PASSWORD });
   const first = await setStatus(id, false);

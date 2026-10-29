@@ -13,6 +13,8 @@ const locationsRouter = require('./routes/locations');
 const productsRouter = require('./routes/products');
 const quantitiesRouter = require('./routes/quantities');
 const shiftsRouter = require('./routes/shifts');
+const distributionsRouter = require('./routes/distributions');
+const reportsRouter = require('./routes/reports');
 const { notFoundHandler, errorHandler } = require('./middleware/error-handler');
 
 const app = express();
@@ -51,6 +53,8 @@ app.use('/api/locations', locationsRouter);
 app.use('/api/products', productsRouter);
 app.use('/api/quantities', quantitiesRouter);
 app.use('/api/shifts', shiftsRouter);
+app.use('/api/distributions', distributionsRouter);
+app.use('/api/reports', reportsRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
